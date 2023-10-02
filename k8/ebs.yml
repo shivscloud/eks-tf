@@ -1,0 +1,159 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: 
+  name: ebs-sc
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer 
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ebs-mysql-pv-claim
+spec: 
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ebs-sc
+  resources: 
+    requests:
+      storage: 4Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: usermanagement-dbcreation-script
+data: 
+  mysql_usermgmt.sql: |-
+    DROP DATABASE IF EXISTS webappdb;
+    CREATE DATABASE webappdb; 
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+spec: 
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  strategy:
+    type: Recreate 
+  template: 
+    metadata: 
+      labels: 
+        app: mysql
+    spec: 
+      containers:
+        - name: mysql
+          image: mysql:5.6
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: dbpassword11
+          ports:
+            - containerPort: 3306
+              name: mysql    
+          volumeMounts:
+            - name: mysql-persistent-storage
+              mountPath: /var/lib/mysql    
+            - name: usermanagement-dbcreation-script
+              mountPath: /docker-entrypoint-initdb.d #https://hub.docker.com/_/mysql Refer Initializing a fresh instance                                            
+      volumes: 
+        - name: mysql-persistent-storage
+          persistentVolumeClaim:
+            claimName: ebs-mysql-pv-claim
+        - name: usermanagement-dbcreation-script
+          configMap:
+            name: usermanagement-dbcreation-script
+---
+apiVersion: v1
+kind: Service
+metadata: 
+  name: mysql
+spec:
+  selector:
+    app: mysql 
+  ports: 
+    - port: 3306  
+  clusterIP: None # This means we are going to use Pod IP    
+---
+apiVersion: apps/v1
+kind: Deployment 
+metadata:
+  name: usermgmt-webapp
+  labels:
+    app: usermgmt-webapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: usermgmt-webapp
+  template:  
+    metadata:
+      labels: 
+        app: usermgmt-webapp
+    spec:
+      initContainers:
+        - name: init-db
+          image: busybox:1.31
+          command: ['sh', '-c', 'echo -e "Checking for the availability of MySQL Server deployment"; while ! nc -z mysql 3306; do sleep 1; printf "-"; done; echo -e "  >> MySQL DB Server has started";']      
+      containers:
+        - name: usermgmt-webapp
+          image: stacksimplify/kube-usermgmt-webapp:1.0.0-MySQLDB
+          imagePullPolicy: Always
+          ports: 
+            - containerPort: 8080           
+          env:
+            - name: DB_HOSTNAME
+              value: "mysql"            
+            - name: DB_PORT
+              value: "3306"            
+            - name: DB_NAME
+              value: "webappdb"            
+            - name: DB_USERNAME
+              value: "root"            
+            - name: DB_PASSWORD
+              value: "dbpassword11"            
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: usermgmt-webapp-clb-service
+  labels: 
+    app: usermgmt-webapp
+spec: 
+  type: LoadBalancer
+  selector: 
+    app: usermgmt-webapp
+  ports: 
+    - port: 80 # Service Port
+      targetPort: 8080 # Container Port
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: usermgmt-webapp-nlb-service
+  labels: 
+    app: usermgmt-webapp
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb    # To create Network Load Balancer
+spec:
+  type: LoadBalancer # Default - CLB
+  selector:
+    app: usermgmt-webapp
+  ports: 
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service 
+metadata:
+  name: usermgmt-webapp-nodeport-service
+spec:
+  type: NodePort # ClusterIp, # NodePort
+  selector:
+    app: usermgmt-webapp
+  ports: 
+    - name: http
+      port: 80 # Service Port
+      targetPort: 8080 # Container Port
+      nodePort: 31280 # Node Port
+                                
